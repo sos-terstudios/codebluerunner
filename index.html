@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Code Blue Runner</title>
+<!-- FAVICONS -->
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="favicon-48.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="favicon-180.png">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+
+  <style>
+    body {
+      margin: 0;
+      background: #020617;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #e5e7eb;
+    }
+
+    canvas {
+      border: 3px solid #0f172a;
+      background: #e5e7eb;
+      box-shadow: 0 0 25px rgba(0, 0, 0, 0.6);
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" width="900" height="600"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+const GROUND_Y = 460;
+
+// "intro" | "playing" | "crashing" | "gameover"
+let gameState = "intro";
+
+let frame = 0;
+let baseSpeed = 5;
+let score = 0;
+let highScore = 0;
+
+let obstacles = [];
+let powerups = [];
+let activePowerUp = null;   // { type, timer }
+
+let obstacleTimer = 0;
+let powerupTimer = 0;
+
+// crash animation state
+let crashTimer = 0;
+
+// background scroll offsets (currently static)
+let floorOffset = 0;
+let wallOffset  = 0;
+
+/* ---------- INTRO STATE ---------- */
+
+// animated boot-sequence
+const introLines = [
+  "Initializing Code Blue Protocol...",
+  "Loading patient vitals...",
+  "Calibrating sprint module...",
+  "Preparing hallway environment..."
+];
+
+let introTimer = 0;
+let introLineIndex = 0;
+let introCharIndex = 0;
+let introLinePause = 0;
+let introBootDone = false;
+let introTitleAlpha = 0;   // fades in title/credits
+
+/* ---------- ASSETS ---------- */
+
+const imagePaths = {
+  doctor_idle: "processed_doctor_idle.png",
+  doctor_run1: "processed_doctor_run1.png",
+  doctor_run2: "processed_doctor_run2.png",
+  doctor_run3: "processed_doctor_run3.png",
+  iv_pole: "processed_iv_pole.png",
+  crash_cart: "processed_crash_cart.png",
+  wet_floor: "processed_wet_floor.png",
+  mask_blue: "processed_mask_blue.png",
+  epi: "processed_epi.png",
+  coffee: "processed_coffee.png",
+  hallway: "hallway_bg.png",
+};
+
+const images = {};
+let assetsLoaded = false;
+
+function loadImages(paths, cb) {
+  let loaded = 0;
+  const keys = Object.keys(paths);
+  const total = keys.length;
+
+  keys.forEach((key) => {
+    const img = new Image();
+    img.src = paths[key];
+    img.onload = () => {
+      images[key] = img;
+      loaded++;
+      if (loaded === total) {
+        assetsLoaded = true;
+        cb();
+      }
+    };
+    img.onerror = () => console.error("Failed to load", paths[key]);
+  });
+}
+
+/* ---------- PLAYER ---------- */
+
+const doctor = {
+  x: 130,
+  y: 0,
+  width: 48 * 3,
+  height: 48 * 3,
+  vy: 0,
+  gravity: 0.75,
+  jumpForce: -18,
+  onGround: true,
+  angle: 0, // for crash tilt
+};
+
+function resetDoctor() {
+  doctor.y = GROUND_Y - doctor.height;
+  doctor.vy = 0;
+  doctor.onGround = true;
+  doctor.angle = 0;
+}
+
+/* ---------- OBSTACLES & POWERUPS ---------- */
+
+const obstacleTypes = [
+  { key: "iv_pole",   sprite: "iv_pole",   scale: 2.7 },
+  { key: "crash_cart",sprite: "crash_cart",scale: 2.5 },
+  { key: "wet_floor", sprite: "wet_floor", scale: 2.0 },
+];
+
+const powerupTypes = [
+  { key: "coffee", sprite: "coffee" },
+  { key: "mask",   sprite: "mask_blue" },
+  { key: "epi",    sprite: "epi" },
+];
+
+function spawnObstacle() {
+  const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+  const img = images[type.sprite];
+  const s   = type.scale;
+  const w = img.width * s;
+  const h = img.height * s;
+
+  obstacles.push({
+    type: type.key,
+    x: WIDTH + 40,
+    y: GROUND_Y - h,
+    width:  w,
+    height: h,
+  });
+
+  const minFrames = 110;
+  const maxFrames = 200;
+  obstacleTimer = Math.floor(minFrames + Math.random() * (maxFrames - minFrames));
+}
+
+function spawnPowerup() {
+  const type = powerupTypes[Math.floor(Math.random() * powerupTypes.length)];
+  const img = images[type.sprite];
+  const s   = 1.3;
+  const w   = img.width * s;
+  const h   = img.height * s;
+
+  powerups.push({
+    type: type.key,
+    sprite: type.sprite,
+    x: WIDTH + 40,
+    y: GROUND_Y - doctor.height - 40,  // floating
+    width:  w,
+    height: h,
+  });
+
+  powerupTimer = Math.floor(260 + Math.random() * 260);
+}
+
+/* ---------- RESET ---------- */
+
+function resetGame() {
+  frame = 0;
+  baseSpeed = 5;
+  score = 0;
+  obstacles = [];
+  powerups = [];
+  activePowerUp = null;
+  obstacleTimer = 60;
+  powerupTimer   = 200;
+  crashTimer = 0;
+  floorOffset = 0;
+  wallOffset  = 0;
+  resetDoctor();
+}
+
+/* ---------- HITBOX HELPERS ---------- */
+
+function getDoctorHitbox() {
+  // Smaller, more centered hitbox = more forgiving
+  const w = doctor.width * 0.40;   // narrower
+  const h = doctor.height * 0.70;  // shorter
+  return {
+    x: doctor.x + doctor.width * 0.30,
+    y: doctor.y + doctor.height * 0.25,
+    width:  w,
+    height: h,
+  };
+}
+
+function getObjectHitbox(o) {
+  // Shrink more so you don't "die" when you're visually a bit away
+  const shrinkX = o.width * 0.25;
+  const shrinkY = o.height * 0.20;
+  return {
+    x: o.x + shrinkX,
+    y: o.y + shrinkY,
+    width:  o.width  - shrinkX * 2,
+    height: o.height - shrinkY * 2,
+  };
+}
+
+function getPowerupHitbox(p) {
+  return getObjectHitbox(p);
+}
+
+function rectOverlap(a, b) {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
+}
+
+/* ---------- POWERUPS ---------- */
+
+function applyPowerup(type) {
+  let duration = 600;
+  if (type === "coffee") duration = 420;
+  if (type === "epi")    duration = 360;
+  if (type === "mask")   duration = 900;
+
+  activePowerUp = { type, timer: duration };
+}
+
+/* ---------- CRASH ---------- */
+
+function triggerCrash() {
+  if (gameState !== "playing") return;
+  gameState = "crashing";
+  crashTimer = 45;           // ~0.75 sec
+  doctor.vy = -8;            // little pop up
+  doctor.onGround = false;
+}
+
+function updateCrash() {
+  frame++;
+
+  floorOffset = 0;
+  wallOffset  = 0;
+
+  // doctor falls + tilts
+  doctor.vy += doctor.gravity;
+  doctor.y  += doctor.vy;
+
+  if (doctor.y + doctor.height >= GROUND_Y) {
+    doctor.y = GROUND_Y - doctor.height;
+    doctor.vy = 0;
+    doctor.onGround = true;
+  }
+
+  // tilt towards -45°
+  if (doctor.angle > -Math.PI / 4) {
+    doctor.angle -= 0.06;
+  }
+
+  crashTimer--;
+  if (crashTimer <= 0) {
+    gameOver();
+  }
+
+  drawGame(true); // true = crashing overlay
+}
+
+/* ---------- INTRO UPDATE & DRAW ---------- */
+
+function updateIntro() {
+  introTimer++;
+
+  // typing effect for boot lines
+  if (!introBootDone) {
+    const currentLine = introLines[introLineIndex];
+
+    if (introCharIndex < currentLine.length) {
+      if (introTimer % 2 === 0) { // typing speed
+        introCharIndex++;
+      }
+    } else {
+      introLinePause++;
+      if (introLinePause > 30) {   // pause before next line
+        introLinePause = 0;
+        introLineIndex++;
+        introCharIndex = 0;
+        if (introLineIndex >= introLines.length) {
+          introBootDone = true;
+        }
+      }
+    }
+  } else {
+    // fade in title + credits
+    if (introTitleAlpha < 1) {
+      introTitleAlpha += 0.02;
+      if (introTitleAlpha > 1) introTitleAlpha = 1;
+    }
+  }
+}
+
+function drawIntro() {
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+  // dark background
+  ctx.fillStyle = "#020617";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  // subtle glow rectangle (like a monitor)
+  ctx.fillStyle = "#020c1f";
+  ctx.fillRect(80, 80, WIDTH - 160, HEIGHT - 160);
+
+  ctx.save();
+  ctx.translate(0, 0);
+
+  // terminal-style boot text
+  ctx.font = "20px 'Segoe UI', monospace";
+  ctx.fillStyle = "#a5f3fc";
+
+  const startY = 150;
+  const lineHeight = 30;
+
+  // draw completed lines
+  for (let i = 0; i < introLineIndex; i++) {
+    ctx.fillText("> " + introLines[i], 120, startY + i * lineHeight);
+  }
+
+  // draw current line (typing)
+  if (!introBootDone && introLineIndex < introLines.length) {
+    const partial = introLines[introLineIndex].slice(0, introCharIndex);
+    ctx.fillText("> " + partial, 120, startY + introLineIndex * lineHeight);
+
+    // blinking cursor
+    const showCursor = Math.floor(introTimer / 20) % 2 === 0;
+    if (showCursor) {
+      const cursorX = 120 + ctx.measureText("> " + partial).width + 6;
+      ctx.fillRect(cursorX, startY + introLineIndex * lineHeight - 14, 10, 2);
+    }
+  }
+
+  // if boot done, show title + credits
+  if (introBootDone) {
+    ctx.globalAlpha = introTitleAlpha;
+
+    ctx.fillStyle = "#f9fafb";
+    ctx.font = "40px 'Segoe UI', sans-serif";
+    ctx.fillText("CODE BLUE RUNNER", 250, 320);
+
+    ctx.font = "20px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#a5f3fc";
+    ctx.fillText("A SOS-ter Studios Production", 300, 355);
+
+    ctx.font = "18px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#e5e7eb";
+    ctx.fillText("by Dr. Pranati Kilaru & Dr. Pranavi Kilaru", 275, 385);
+
+    // blinking "Press SPACE"
+    const showPress = Math.floor(introTimer / 30) % 2 === 0;
+    if (showPress) {
+      ctx.font = "22px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillText("Press SPACE to begin", 320, 430);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+/* ---------- MAIN UPDATE ---------- */
+
+function update() {
+  if (!assetsLoaded) {
+    drawLoading();
+    requestAnimationFrame(update);
+    return;
+  }
+
+  // INTRO STATE
+  if (gameState === "intro") {
+    updateIntro();
+    drawIntro();
+    requestAnimationFrame(update);
+    return;
+  }
+
+  // GAMEOVER JUST DRAWS + WAITS
+  if (gameState === "gameover") {
+    drawGame(false);
+    requestAnimationFrame(update);
+    return;
+  }
+
+  // CRASHING SEQUENCE
+  if (gameState === "crashing") {
+    updateCrash();
+    requestAnimationFrame(update);
+    return;
+  }
+
+  // ----- PLAYING -----
+  frame++;
+
+  let speedMult = 1;
+  let scoreMult = 1;
+
+  if (activePowerUp) {
+    if (activePowerUp.type === "coffee") {
+      speedMult = 1.2;
+      scoreMult = 2;
+    } else if (activePowerUp.type === "epi") {
+      speedMult = 1.5;
+      scoreMult = 1.5;
+    }
+    activePowerUp.timer--;
+    if (activePowerUp.timer <= 0) activePowerUp = null;
+  }
+
+  const speed = baseSpeed * speedMult;
+  score += 1 * scoreMult;
+
+  if (frame % 800 === 0) baseSpeed += 0.3;
+
+  floorOffset = 0;
+  wallOffset  = 0;
+
+  // physics
+  doctor.vy += doctor.gravity;
+  doctor.y  += doctor.vy;
+
+  if (doctor.y + doctor.height >= GROUND_Y) {
+    doctor.y = GROUND_Y - doctor.height;
+    doctor.vy = 0;
+    doctor.onGround = true;
+  }
+
+  // spawn logic
+  obstacleTimer--;
+  if (obstacleTimer <= 0) spawnObstacle();
+
+  powerupTimer--;
+  if (powerupTimer <= 0) spawnPowerup();
+
+  // move things
+  obstacles.forEach(o => o.x -= speed);
+  powerups.forEach(p => p.x -= speed * 0.9);
+
+  obstacles = obstacles.filter(o => o.x + o.width > -60);
+  powerups  = powerups.filter(p => p.x + p.width > -60);
+
+  // keep powerups away from obstacles
+  powerups.forEach(p => {
+    obstacles.forEach(o => {
+      if (rectOverlap(getPowerupHitbox(p), getObjectHitbox(o))) {
+        p.x += 140;
+      }
+    });
+  });
+
+  // powerup collisions
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    if (rectOverlap(getDoctorHitbox(), getPowerupHitbox(powerups[i]))) {
+      applyPowerup(powerups[i].type);
+      powerups.splice(i, 1);
+    }
+  }
+
+  // obstacle collisions
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    if (rectOverlap(getDoctorHitbox(), getObjectHitbox(obstacles[i]))) {
+      if (activePowerUp && activePowerUp.type === "mask") {
+        activePowerUp = null;
+        obstacles.splice(i, 1);
+      } else {
+        triggerCrash();
+        break;
+      }
+    }
+  }
+
+  drawGame(false);
+  requestAnimationFrame(update);
+}
+
+/* ---------- GAME DRAWING ---------- */
+
+function drawDoctor() {
+  let img;
+  if (!doctor.onGround) {
+    img = images.doctor_run2 || images.doctor_idle;
+  } else {
+    const runCycle = [images.doctor_run1, images.doctor_run2, images.doctor_run3, images.doctor_run2];
+    const idx = Math.floor(frame / 6) % runCycle.length;
+    img = runCycle[idx];
+  }
+  if (!img) img = images.doctor_idle;
+
+  let bob = 0;
+  if (doctor.onGround && gameState === "playing") {
+    bob = Math.sin(frame / 6) * 3;
+  }
+
+  if (gameState === "crashing") {
+    ctx.save();
+    ctx.translate(doctor.x + doctor.width / 2, doctor.y + doctor.height / 2);
+    ctx.rotate(doctor.angle);
+    ctx.drawImage(img, -doctor.width / 2, -doctor.height / 2, doctor.width, doctor.height);
+    ctx.restore();
+  } else {
+    ctx.drawImage(img, doctor.x, doctor.y + bob, doctor.width, doctor.height);
+  }
+}
+
+function drawObstacles() {
+  obstacles.forEach(o => {
+    let img;
+    if (o.type === "iv_pole")    img = images.iv_pole;
+    if (o.type === "crash_cart") img = images.crash_cart;
+    if (o.type === "wet_floor")  img = images.wet_floor;
+    if (!img) return;
+    ctx.drawImage(img, o.x, o.y, o.width, o.height);
+  });
+}
+
+function drawPowerups() {
+  powerups.forEach(p => {
+    const img = images[p.sprite];
+    if (!img) return;
+    ctx.drawImage(img, p.x, p.y, p.width, p.height);
+  });
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
+  ctx.fillRect(10, 10, 320, 100);
+
+  ctx.fillStyle = "#f9fafb";
+  ctx.font = "18px 'Segoe UI', sans-serif";
+  ctx.fillText("Time to Code Blue: " + Math.floor(score), 20, 35);
+  ctx.fillText("Speed: " + baseSpeed.toFixed(1), 20, 58);
+  ctx.fillText("High Score: " + Math.floor(highScore), 20, 81);
+
+  if (activePowerUp) {
+    let label = "";
+    if (activePowerUp.type === "coffee") label = "Coffee: speed + double score";
+    if (activePowerUp.type === "epi")    label = "Adrenaline: super speed";
+    if (activePowerUp.type === "mask")   label = "N95: temporary invincibility";
+
+    ctx.font = "16px 'Segoe UI', sans-serif";
+    ctx.fillText(label, 20, 103);
+  }
+}
+
+function drawGameOver() {
+  ctx.fillStyle = "rgba(0,0,0,0.65)";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  ctx.fillStyle = "#ef4444";
+  ctx.font = "40px 'Segoe UI', sans-serif";
+  ctx.fillText("CODE BLUE FAILED", 260, 150);
+
+  ctx.fillStyle = "#f9fafb";
+  ctx.font = "22px 'Segoe UI', sans-serif";
+  ctx.fillText("Score: " + Math.floor(score), 370, 190);
+  ctx.fillText("Press SPACE to try again", 300, 230);
+}
+
+function drawLoading() {
+  ctx.fillStyle = "#020617";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  ctx.fillStyle = "#f9fafb";
+  ctx.font = "24px 'Segoe UI', sans-serif";
+  ctx.fillText("Loading assets...", 340, 190);
+}
+
+function drawGame(isCrashingOverlay) {
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+  if (images.hallway) {
+    ctx.drawImage(images.hallway, 0, 0, WIDTH, HEIGHT);
+  }
+
+  drawDoctor();
+  drawObstacles();
+  drawPowerups();
+  drawHUD();
+
+  if (isCrashingOverlay) {
+    ctx.fillStyle = "rgba(239,68,68,0.35)";
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  }
+
+  if (gameState === "gameover") {
+    drawGameOver();
+  }
+}
+
+/* ---------- GAME STATE ---------- */
+
+function gameOver() {
+  gameState = "gameover";
+  if (score > highScore) highScore = score;
+}
+
+/* ---------- CONTROLS ---------- */
+
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+
+    if (gameState === "intro") {
+      if (!introBootDone) {
+        // skip boot text straight to title
+        introBootDone = true;
+        introTitleAlpha = 1;
+      } else {
+        resetGame();
+        gameState = "playing";
+      }
+
+    } else if (gameState === "playing") {
+      if (doctor.onGround) {
+        doctor.vy = doctor.jumpForce;
+        doctor.onGround = false;
+      }
+
+    } else if (gameState === "gameover") {
+      resetGame();
+      gameState = "playing";
+    }
+
+    e.preventDefault();
+  }
+});
+
+/* ---------- START ---------- */
+
+loadImages(imagePaths, () => {
+  resetGame();
+  update();
+});
+</script>
+</body>
+</html>
